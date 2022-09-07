@@ -56,7 +56,6 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.annotation.Nullable;
 
@@ -150,7 +149,6 @@ public class NodesManager implements EventDispatcherListener {
   }
 
   private Queue<NativeUpdateOperation> mOperationsInBatch = new LinkedList<>();
-  private boolean mTryRunBatchUpdatesSynchronously = false;
 
   public NodesManager(ReactContext context) {
     mContext = context;
@@ -215,19 +213,12 @@ public class NodesManager implements EventDispatcherListener {
     if (!mOperationsInBatch.isEmpty()) {
       final Queue<NativeUpdateOperation> copiedOperationsQueue = mOperationsInBatch;
       mOperationsInBatch = new LinkedList<>();
-      final boolean trySynchronously = mTryRunBatchUpdatesSynchronously;
-      mTryRunBatchUpdatesSynchronously = false;
-      final Semaphore semaphore = new Semaphore(0);
       mContext.runOnNativeModulesQueueThread(
           new GuardedRunnable(mContext.getExceptionHandler()) {
             @Override
             public void runGuarded() {
               boolean queueWasEmpty =
                   UIManagerReanimatedHelper.isOperationQueueEmpty(mUIImplementation);
-              boolean shouldDispatchUpdates = trySynchronously && queueWasEmpty;
-              if (!shouldDispatchUpdates) {
-                semaphore.release();
-              }
               while (!copiedOperationsQueue.isEmpty()) {
                 NativeUpdateOperation op = copiedOperationsQueue.remove();
                 ReactShadowNode shadowNode = mUIImplementation.resolveShadowNode(op.mViewTag);
@@ -238,21 +229,8 @@ public class NodesManager implements EventDispatcherListener {
               if (queueWasEmpty) {
                 mUIImplementation.dispatchViewUpdates(-1); // no associated batchId
               }
-              if (shouldDispatchUpdates) {
-                semaphore.release();
-              }
             }
           });
-      if (trySynchronously) {
-        while (true) {
-          try {
-            semaphore.acquire();
-            break;
-          } catch (InterruptedException e) {
-            // noop
-          }
-        }
-      }
     }
   }
 
@@ -433,11 +411,7 @@ public class NodesManager implements EventDispatcherListener {
     ((PropsNode) node).disconnectFromView(viewTag);
   }
 
-  public void enqueueUpdateViewOnNativeThread(
-      int viewTag, WritableMap nativeProps, boolean trySynchronously) {
-    if (trySynchronously) {
-      mTryRunBatchUpdatesSynchronously = true;
-    }
+  public void enqueueUpdateViewOnNativeThread(int viewTag, WritableMap nativeProps) {
     mOperationsInBatch.add(new NativeUpdateOperation(viewTag, nativeProps));
   }
 
@@ -587,7 +561,7 @@ public class NodesManager implements EventDispatcherListener {
             viewTag, new ReactStylesDiffMap(newUIProps));
       }
       if (hasNativeProps) {
-        enqueueUpdateViewOnNativeThread(viewTag, newNativeProps, true);
+        enqueueUpdateViewOnNativeThread(viewTag, newNativeProps);
       }
       if (hasJSProps) {
         WritableMap evt = Arguments.createMap();
